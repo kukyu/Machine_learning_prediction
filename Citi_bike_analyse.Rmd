@@ -1,0 +1,786 @@
+---
+title: "Citi_bike_analyse"
+author: "kukyu"
+date: "2023-04-02"
+output: html_document
+---
+
+# 加载包
+
+```{r}
+library(tidyverse)
+library(corrplot)
+```
+
+# 读取2022年 Citi_bike数据
+
+```{r}
+cb1 = read.csv("2022-JC/JC-202201-citibike-tripdata.csv")
+cb2 = read.csv("2022-JC/JC-202202-citibike-tripdata.csv")
+cb3 = read.csv("2022-JC/JC-202203-citibike-tripdata.csv")
+cb4 = read.csv("2022-JC/JC-202204-citibike-tripdata.csv")
+cb5 = read.csv("2022-JC/JC-202205-citibike-tripdata.csv")
+cb6 = read.csv("2022-JC/JC-202206-citibike-tripdata.csv")
+cb7 = read.csv("2022-JC/JC-202207-citibike-tripdata.csv")
+cb8 = read.csv("2022-JC/JC-202208-citibike-tripdata.csv")
+cb9 = read.csv("2022-JC/JC-202209-citibike-tripdata.csv")
+cb10 = read.csv("2022-JC/JC-202210-citibike-tripdata.csv")
+cb11 = read.csv("2022-JC/JC-202211-citibike-tripdata.csv")
+cb12 = read.csv("2022-JC/JC-202212-citibike-tripdata.csv")
+
+cb = rbind(cb1, cb2, cb3, cb4, cb5, cb6, cb7, cb7, cb8, cb9, cb10, cb11, cb12)
+str(cb)
+```
+
+总共 1003987 obs. of 13 variables
+
+# 数据预处理
+
+## 缺失值处理
+
+```{r}
+# 查找缺失值
+na_rows <- which(apply(is.na(cb), 1, any)) # 查找空值所在的行
+na_cols <- which(colSums(is.na(as.matrix(cb))) > 0)
+any(is.na(cb$end_lng))
+any(is.na(cb$end_lat))
+# 删除缺失值
+cb <- na.omit(cb)
+str(cb)
+# 1001697 obs. of  13 variables:
+```
+
+根据实际情况将docked_bike修改 为classic_bike
+
+```{r}
+cb$rideable_type <- gsub("docked_bike", "classic_bike", cb$rideable_type)
+```
+
+## 去除重复的订单
+
+```{r}
+cb = cb[!duplicated(cb$ride_id), ]
+# 893515
+```
+
+## 通过时间筛选异常值
+
+计算持续时长
+
+```{r}
+cb$started_at <- as.POSIXct(cb$started_at, format = "%Y-%m-%d %H:%M:%S")
+cb$ended_at <- as.POSIXct(cb$ended_at, format = "%Y-%m-%d %H:%M:%S")
+cb$duration = difftime(cb$ended_at, cb$started_at, units = "secs") # 单位为s
+```
+
+筛选不正常的数据 小于100s 大于6h的异常数据删除
+
+```{r}
+cb$duration_hour <- as.numeric(cb$duration/3600)
+cb <- cb %>%
+  filter(duration_hour < 6 & duration_hour > 100/3600)
+# 858054
+```
+
+## 通过距离/速度筛选异常值
+
+### 通过经纬度计算距离的函数
+
+```{r}
+haversine <- function(lon1,lat1, lon2, lat2) {
+  R <- 6371 # 地球半径，单位千米
+  dLat <- (lat2 - lat1) * pi / 180
+  dLon <- (lon2 - lon1) * pi / 180
+  a <- sin(dLat / 2) * sin(dLat / 2) + cos(lat1 * pi / 180) * cos(lat2 * pi / 180) * sin(dLon / 2) * sin(dLon / 2)
+  c <- 2 * atan2(sqrt(a), sqrt(1 - a))
+  d <- R * c
+  return(d)
+}
+```
+
+计算距离
+
+```{r}
+
+cb$dist <- haversine(cb$start_lng, cb$start_lat, cb$end_lng, cb$end_lat)
+# any(is.na(cb$dist))
+cb <- na.omit(cb)
+
+```
+
+筛选站点不一样的
+
+```{r}
+
+cb$speed <- cb$dist/cb$duration_hour
+
+new_cb <- cb %>%
+  filter(start_station_name != end_station_name)
+```
+
+分组电车和自行车
+
+```{r}
+electric_bike <- new_cb %>% 
+  filter(rideable_type == "electric_bike")
+
+classic_bike <- new_cb %>%
+  filter(rideable_type == "classic_bike")
+  
+```
+
+### 箱线图确定异常值
+
+筛选速度异常值, 查找箱线图中的异常值
+
+```{r}
+boxplot(speed ~ rideable_type, data = new_cb)
+
+```
+
+从原始数据中删除异常值
+
+```{r}
+quantile(classic_bike$speed)
+quantile(electric_bike$speed)
+outliers_2 <- boxplot.stats(electric_bike$speed)$out
+# boxplot(outliers_2)
+outliers_2_1 <- subset(outliers_2,outliers_2 < 1 | outliers_2 > 40 )
+cb <- subset(cb, !cb$speed %in% outliers_2_1)
+# 854374
+```
+
+## 去除未知站点的数据
+
+存在""但不是空值
+
+```{r}
+# unique(cb$start_station_name)
+cb <- cb %>%
+  filter(start_station_name != "") 
+
+cb <- cb %>%
+  filter(end_station_name != "")
+
+# 853494
+```
+
+# 描述性统计
+
+## 可视化车的种类
+
+```{r}
+bike_type <- cb %>%
+  group_by(type = rideable_type) %>%
+  summarize(sum_of_type = length(type))
+```
+
+画图
+
+```{r}
+
+ggplot(bike_type, aes(x = type, y = sum_of_type)) +
+  geom_bar(stat = "identity", fill = c("#4DAF4A", "#377EB8"))+
+  labs(title="不同类型自行车租赁次数", x="自行车类型", y="租赁次数") +
+  theme(plot.title = element_text(hjust = 0.5)) +
+  geom_text(aes(label = sum_of_type), vjust = -0.5)
+```
+
+## 计算平均速度
+
+```{r}
+new_cb <- subset(new_cb, !new_cb$speed %in% outliers_2_1)
+
+electric_bike <- new_cb %>% 
+  filter(rideable_type == "electric_bike")
+
+classic_bike <- new_cb %>%
+  filter(rideable_type == "classic_bike")
+electric_bike_speed <- mean(electric_bike$speed)
+classic_bike_speed <- mean(classic_bike$speed)
+```
+
+```{r}
+electric_bike_speed
+classic_bike_speed
+```
+
+### 箱线图
+
+```{r}
+boxplot(speed ~ rideable_type, data = new_cb ,outline = F)
+# summary(electric_bike$speed)
+# summary(classic_bike$speed)
+```
+
+##租赁点数量统计
+
+```{r}
+length(unique(cb$start_station_name))
+```
+
+## 每次租借平均时长(分钟)
+
+```{r}
+sum(as.numeric(cb$duration))/length(cb$ride_id)/60
+```
+
+## 会员和普通用户骑行时间分布
+
+### 会员和普通用户扇形图
+
+```{r}
+user_type <- cb %>%
+  group_by(user_type = member_casual) %>%
+  summarize(sum_value = length(user_type))
+user_type$percent_value <- user_type$sum_value/length(cb$member_casual)*100
+user_type$percent_value <- paste0(round(user_type$percent_value, 1), "%")
+```
+
+绘制饼图
+
+```{r}
+ggplot(user_type, aes(x = "",  y = sum_value, fill = user_type)) +
+  geom_bar( stat = "identity", color = "white") + 
+  coord_polar(theta = "y",start = 0, direction = 1) +
+  geom_text(aes(y = sum(sum_value)-cumsum(sum_value) + sum_value/2, 
+                label = percent_value), size=4.5) +
+  theme_void() + 
+  labs(title="2022年会员和普通用户比例") +
+  theme(plot.title = element_text(hjust = 0.5)) 
+```
+
+## 电车和自行车使用情况（会员和非会员用户）
+
+```{r}
+bike_type <- cb %>%
+  group_by(member_casual, rideable_type) %>%
+  summarise(count = length(ride_id),.groups = "drop") 
+  
+```
+
+转换百分比
+
+```{r}
+ # member_casual 字段对 bike_type 数据框进行分组，然后计算每组的 count 
+ # 字段的总和。
+# grouped <- aggregate(count ~ member_casual, data = bike_type, sum)
+
+# 计算每组的百分比，并添加到新列 percent 中
+# ave()对数据进行分组计算
+bike_type$percent <- ave(bike_type$count, bike_type$member_casual, FUN = function(x) x / sum(x))
+
+#我们对 bike_type 数据框的 count 列进行了分组计算，按照 member_casual 列进行分组，并使用匿名函数 function(x) x / sum(x) 对每个分组的数据进行了归一化处理，使得每个分组的数据之和为 1。这样，我们就得到了一个向量，其中包含了归一化后的结果。
+bike_type$percent2 <- paste0(round(bike_type$percent *100, 1), "%")
+bike_type$label1 = paste(bike_type$rideable_type,'(',bike_type$percent2,')', sep = '')
+
+```
+
+### 绘制双层圆环图
+
+```{r}
+# 绘图
+
+A = bike_type %>%
+  filter(member_casual == "casual") 
+B = bike_type %>%
+  filter(member_casual == "member") 
+
+
+# for循环构建标签的相对位置
+for (i in seq(nrow(A), 1)) {
+  if (i == nrow(A)) {
+    A$per.y1[i] = A$percent[i] / 2
+  }else{
+    A$per.y1[i] = sum(A$percent[(i + 1):nrow(A)]) + A$percent[i] / 2
+  }
+}
+
+for (i in seq(nrow(B), 1)) {
+  if (i == nrow(B)) {
+    B$per.y2[i] = B$percent[i] / 2
+  }else{
+    B$per.y2[i] = sum(B$percent[(i + 1):nrow(B)]) + B$percent[i] / 2
+  }
+}
+colnames(B)[1] = "member"
+colnames(B)[6] = "label2"
+colnames(B)[4] = "PercentB"
+colnames(B)[5] = "PercentB_2"
+bike_type_2 <- cbind(A, B[,c(1,4,5 ,6,7)])
+
+```
+
+绘图
+
+```{r}
+
+ggplot(bike_type_2) +
+  # 绘制柱状图
+  geom_bar(aes(x = member_casual, percent, fill = rideable_type), 
+           stat = 'identity', width = 1.3) +
+  # 添加标签
+  geom_text(aes(1.25, as.numeric(per.y1), 
+                label = percent2),
+            size =4, color = 'black') +
+  
+  geom_bar(aes(x = member, y = PercentB, fill = rideable_type), 
+           stat = 'identity', width = 0.8, color = "white") + 
+   geom_text(aes(2, as.numeric(per.y2), 
+                label = PercentB_2),
+            size = 4.5, color = 'black') +
+# 设置Y轴刻度
+  scale_y_continuous(labels = scales::percent) +
+  coord_polar(theta = "y") + # 转换坐标轴
+  theme_void()+
+  scale_fill_manual(values = c("#99d0fb" ,"#5a7aa2")) +
+  theme(plot.title = element_text(hjust = 0.5)) +
+  labs(title = "会员和非会员用户骑行类型对比") +
+  annotate("text", x = Inf, y = Inf, hjust = -0.1
+           , vjust = -1, label = "外环:member 内环:casual") 
+
+```
+
+## 每个站点的火爆程度
+
+筛选开始站点和结束站点
+
+```{r}
+start_station_order <- cb %>%
+  group_by(station_name = start_station_name) %>%
+  summarize(sum_value = length(ride_id))
+end_station_order <- cb %>%
+  group_by(station_name = end_station_name) %>%
+  summarize(sum_value = length(ride_id))
+```
+
+筛选前十名和后十名
+
+```{r}
+
+
+start_top_10 <- head(start_station_order[order(start_station_order$sum_value,decreasing = TRUE),], 10)
+start_min_10 <- tail(start_station_order[order(start_station_order$sum_value,decreasing = TRUE),], 10)
+
+end_top_10 <- head(end_station_order[order(end_station_order$sum_value,decreasing = TRUE),], 10)
+end_min_10 <- tail(end_station_order[order(end_station_order$sum_value,decreasing = TRUE),], 10)
+```
+
+绘图
+
+```{r}
+
+ggplot(start_top_10, aes(x = reorder(station_name, -sum_value),
+                         y = sum_value)) +
+  geom_bar(stat = "identity", fill = "#377EB8") +
+  labs(title="2022年排行前10的开始站点", x="开始站点", y="租赁次数") +
+  geom_text(aes(label = sum_value), vjust = -0.5) +
+  theme(plot.title = element_text(hjust = 0.5), 
+        axis.text.x = element_text(angle = 45, hjust = 1)) 
+
+ggplot(start_min_10, aes(x = reorder(station_name, sum_value), y = sum_value)) +
+  geom_bar(stat = "identity", fill = "#377EB8") +
+  labs(title="2022年排行后10的开始站点", x="开始站点", y="租赁次数") +
+  geom_text(aes(label = sum_value), vjust = -0.5) +
+  theme(plot.title = element_text(hjust = 0.5), 
+        axis.text.x = element_text(angle = 45, hjust = 1)) 
+
+ggplot(end_top_10, aes(x = reorder(station_name, -sum_value), 
+                       y = sum_value)) +
+  geom_bar(stat = "identity", fill = "#4DAF4A") +
+  labs(title="2022年排行前10的结束站点", x="结束站点", y="租赁次数") +
+  geom_text(aes(label = sum_value), vjust = -0.5) +
+  theme(plot.title = element_text(hjust = 0.5), 
+        axis.text.x = element_text(angle = 45, hjust = 1)) 
+
+ggplot(end_min_10, aes(x = reorder(station_name, sum_value),
+                         y = sum_value)) +
+  geom_bar(stat = "identity", fill = "#4DAF4A") +
+  labs(title="2022年排行后10的结束站点", x="结束站点", y="租赁次数") +
+  geom_text(aes(label = sum_value), vjust = -0.5) +
+  theme(plot.title = element_text(hjust = 0.5), 
+        axis.text.x = element_text(angle = 45, hjust = 1)) 
+```
+
+## 全年骑行趋势图
+
+```{r}
+sum_months <-  cb %>%
+  mutate(month = month(started_at)) %>%
+  group_by(month) %>%
+  summarise(sum_month = length(ride_id))
+```
+
+### 按月份绘制折线图
+
+```{r}
+ggplot(data = sum_months, aes(x = month, y = sum_month)) +
+  geom_line(linewidth = 1.2, color = 'orange') +
+  geom_point(size=2, color = 'red') +
+  labs(x = "月份", y = "租赁次数", title="2022年Citi Bike用户租赁情况", ) +
+  theme(plot.title = element_text(hjust = 0.5)) +
+  scale_x_continuous(breaks = 1:12) 
+  # geom_text(aes(label = sum_month), vjust = -0.5)
+```
+
+### 按季度汇总骑行数据
+
+```{r}
+data_quarter<- cb %>% 
+    mutate(quarter = quarter(started_at)) %>%
+    group_by(quarter) %>%
+    summarise(sum_quarter = length(ride_id))
+```
+
+绘制条形图
+
+```{r}
+data_quarter$quarter <- as.factor(data_quarter$quarter)
+ggplot(data_quarter, aes(x = quarter, y = sum_quarter)) +
+  geom_bar(stat = "identity", fill = c( "#FDC100","#FF7F00","#377EB8", "#984EA3")) +
+  labs(title="2022年每一季度自行车租赁次数", x="季度", y="租赁次数") +
+  geom_text(aes(label = sum_quarter), vjust = -0.5) +
+  scale_x_discrete(labels=c("第一季度", "第二季度", "第三季度", "第四季度")) + theme(plot.title = element_text(hjust = 0.5), 
+        axis.text.x = element_text(angle = 25, hjust = 1)) # 居中显示+旋转标签
+
+
+```
+
+## 按天数绘制折线图
+
+按天数进行汇总
+
+```{r}
+sum_days <-  cb %>%
+  mutate(day = day(started_at)) %>%
+  group_by(day) %>%
+  summarise(sum_day = length(ride_id))
+
+```
+
+绘图
+
+```{r}
+ggplot(data = sum_days, aes(x = day, y = sum_day)) +
+  geom_line(linewidth = 1.5, color = "orange") +
+  geom_point(size=2.5, color = 'red') +
+  geom_hline(yintercept = mean(sum_days$sum_day), linetype = "dashed", color = "blue") +
+  labs(x = "天数", y = "租赁次数", title="2022年每天租赁次数变化趋势", ) +
+  theme(plot.title = element_text(hjust = 0.5)) +
+  scale_x_continuous(breaks = 1:31) 
+```
+
+## 分析31号为什么断崖式下降
+
+有些月份没有31天
+
+## 按星期进行汇总
+
+```{r}
+library(lubridate)
+cb$weekday <- wday(cb$started_at, label = TRUE)
+```
+
+周一到周日统计
+
+```{r}
+week_hour_1 <-  cb %>%
+  mutate(hour = hour(started_at)) %>%
+  group_by(hour) %>%
+  summarise(Monday = sum(weekday=="周一"))
+week_hour_2 <-  cb %>%
+  mutate(hour = hour(started_at)) %>%
+  group_by(hour) %>%
+  summarise(Tuesday = sum(weekday=="周二"))
+week_hour_3 <-  cb %>%
+  mutate(hour = hour(started_at)) %>%
+  group_by(hour) %>%
+  summarise(Wednesday = sum(weekday=="周三"))
+week_hour_4 <-  cb %>%
+  mutate(hour = hour(started_at)) %>%
+  group_by(hour) %>%
+  summarise(Thursday = sum(weekday=="周四"))
+week_hour_5 <-  cb %>%
+  mutate(hour = hour(started_at)) %>%
+  group_by(hour) %>%
+  summarise(Friday = sum(weekday=="周五"))
+week_hour_6 <-  cb %>%
+  mutate(hour = hour(started_at)) %>%
+  group_by(hour) %>%
+  summarise(Saturday = sum(weekday=="周六"))
+week_hour_7 <-  cb %>%
+  mutate(hour = hour(started_at)) %>%
+  group_by(hour) %>%
+  summarise(Sunday = sum(weekday=="周日"))
+
+```
+
+### 连接表
+
+```{r}
+week_hour <- merge(week_hour_1, week_hour_2, by = "hour") %>%
+          merge(week_hour_3, by = "hour") %>%
+          merge(week_hour_4, by = "hour") %>%
+          merge(week_hour_5, by = "hour") %>%
+          merge(week_hour_6, by = "hour") %>%
+          merge(week_hour_7, by = "hour")
+```
+
+### 绘制折线图
+
+```{r}
+ggplot(week_hour, aes(x = hour)) +
+  geom_line(aes(y = Monday, color = "星期一"), linewidth=1) +
+  geom_line(aes(y = Tuesday, color = "星期二"), linewidth=1) +
+  geom_line(aes(y = Wednesday, color = "星期三"), linewidth=1) +
+  geom_line(aes(y = Thursday, color = "星期四"), linewidth=1) +
+  geom_line(aes(y = Friday, color = "星期五"), linewidth=1) +
+  geom_line(aes(y = Saturday, color = "星期六"), linewidth=1) +
+  geom_point(aes(y = Saturday), shape = 23, fill = "red") +
+  geom_line(aes(y = Sunday, color = "星期日"), linewidth=1) +
+  geom_point(aes(y = Sunday), shape = 2) +
+  labs(title = "按星期的每天的租赁次数", x =  "小时", y = "租赁次数", color = "星期") +
+  theme(plot.title = element_text(hjust = 0.5)) +
+  scale_x_continuous(breaks = 0:23)  +
+  scale_color_manual(values = c("#4DAF4A", "#474552","#E41A1C","#FF7F00", "#984EA3","#377EB8","#FDC100"), limits = c("星期一", "星期二", "星期三",
+                        "星期四", "星期五", "星期六", "星期日"))
+```
+
+### 骑行时间分布
+
+```{r}
+cb$duration <- as.numeric(cb$duration)
+trip_max = max(cb$duration)/60;trip_max
+trip_min = min(cb$duration)/60;trip_min
+```
+
+会员非会员骑行数据分组
+
+```{r}
+cb$trip_time <- cb$duration/60
+cb$time_groups <- cut(cb$trip_time, c(0, 5, 10, 20, 30, 45, Inf),
+                  labels = c('0-5分钟', '5-10分钟', '10-20分钟', '20-30分钟', '30-45分钟', '更长时间'), right = FALSE)
+```
+
+### 画条形图
+
+```{r}
+# cb$time_groups <- factor(cb$time_groups, levels = c('0-5分钟', '5-10分钟', '10-20分钟', '20-30分钟', '30-45分钟', '更长时间'))
+ggplot(cb, aes(x = time_groups,fill=as.factor(member_casual))) +
+  geom_bar(stat="count",width=0.5,position='dodge')+
+  scale_fill_manual(values=c('#304156','#e69f00'))+
+  geom_text(stat='count',aes(label=..count..), color="black", size=3, position=position_dodge(0.5),vjust=-0.5)+
+ labs(title="会员和非会员租赁情况", x="骑行时间", y="租赁次数",   fill="用户类型")  +
+theme(plot.title = element_text(hjust = 0.5))
+```
+
+## 借车量和还车量 取7月份的某一周(27周)
+
+以"Grove St PATH"站点为例
+
+### 区分工作日高峰期（7-9） （5-7）
+
+五分钟分组计算开始骑行 早高峰开始
+
+```{r}
+workday_5m <- cb %>%
+  filter(week(started_at) == 27) %>%
+  filter(start_station_name == "Grove St PATH") %>%
+  filter(weekdays(started_at) %in% c("星期一", "星期二", "星期三", "星期四", "星期五")) %>%
+  filter(hour(started_at) >= 7 & hour(started_at) < 9) %>%
+  group_by(timestamp = floor_date(started_at, "5 minutes")) %>%
+  summarise(work_count = length(ride_id))
+workday_5m_start_morning <- workday_5m %>%
+mutate(time = format(timestamp, "%H:%M")) %>%
+  group_by(time = time) %>%
+  summarize(sum_start_morning = sum(work_count))
+```
+
+晚高峰开始
+
+```{r}
+workday_5m <- cb %>%
+  filter(week(started_at) == 27) %>%
+  filter(start_station_name == "Grove St PATH") %>%
+  filter(weekdays(started_at) %in% c("星期一", "星期二", "星期三", "星期四", "星期五")) %>%
+  filter(hour(started_at) >= 17 & hour(started_at) < 19) %>%
+  group_by(timestamp = floor_date(started_at, "5 minutes")) %>%
+  summarise(work_count = length(ride_id))
+workday_5m_start_afternoon <- workday_5m %>%
+mutate(time = format(timestamp, "%H:%M")) %>%
+  group_by(time = time) %>%
+  summarize(sum_start_afternoon = sum(work_count))
+```
+
+计算停放 早高峰停放
+
+```{r}
+workday_5m <- cb %>%
+  filter(week(ended_at) == 27) %>%
+  filter(start_station_name == "Grove St PATH") %>%
+  filter(weekdays(ended_at) %in% c("星期一", "星期二", "星期三", "星期四", "星期五")) %>%
+  filter(hour(ended_at) >= 7 & hour(ended_at) < 9) %>%
+  group_by(timestamp = floor_date(ended_at, "5 minutes")) %>%
+  summarise(work_count = length(ride_id))
+workday_5m_end_morning <- workday_5m %>%
+mutate(time = format(timestamp, "%H:%M")) %>%
+  group_by(time = time) %>%
+  summarize(sum_end_morning = sum(work_count))
+```
+
+晚高峰停放
+
+```{r}
+
+workday_5m <- cb %>%
+  filter(week(ended_at) == 27) %>%
+  filter(start_station_name == "Grove St PATH") %>%
+  filter(weekdays(ended_at) %in% c("星期一", "星期二", "星期三", "星期四", "星期五")) %>%
+  filter(hour(ended_at) >= 17 & hour(ended_at) < 19) %>%
+  group_by(timestamp = floor_date(ended_at, "5 minutes")) %>%
+  summarise(work_count = length(ride_id))
+workday_5m_end_afternoon <- workday_5m %>%
+mutate(time = format(timestamp, "%H:%M")) %>%
+  group_by(time = time) %>%
+  summarize(sum_end_afternoon = sum(work_count))
+```
+
+合并早晚高峰
+
+```{r}
+work_morning_peak <- merge(workday_5m_start_morning,workday_5m_end_morning, 
+                           by = "time")
+
+work_afternoon_peak <- merge(workday_5m_start_afternoon,workday_5m_end_afternoon,
+                           by = "time") 
+
+work_morning_peak$diff  <- apply(work_morning_peak[, c("sum_start_morning", "sum_end_morning")], 1, diff)  
+
+work_afternoon_peak$diff  <- apply(work_afternoon_peak[, c("sum_start_afternoon", "sum_end_afternoon")], 1, diff)
+```
+
+### 早高峰绘图
+
+```{r}
+ggplot(work_morning_peak, aes(x = time)) +
+  geom_line(aes(y = sum_start_morning, group = 1,  color = '借车量'), 
+            linewidth = 1.2) +
+  geom_line(aes(y = sum_end_morning, group = 1, color = '还车量'), 
+            linewidth = 1.2) +
+  geom_line(aes(y = diff, group = 1, color = '差异值'), 
+            linewidth = 1.2, linetype = "dashed") +
+  labs(x = "时间", y = "借还次数", title="Grove PATH站点某一周早高峰借还车辆情况", color = "借还车") +
+  scale_color_manual(limits = c('借车量', '还车量', '差异值' ), values=c('#00bfc4','#f8766d', "black" )) +
+  theme(plot.title = element_text(hjust = 0.5), 
+        axis.text.x = element_text(angle = 45, hjust = 1)) 
+```
+
+### 晚高峰绘图
+
+```{r}
+ggplot(work_afternoon_peak, aes(x = time)) +
+  geom_line(aes(y = sum_start_afternoon, group = 1,  color = '借车量'), 
+            linewidth = 1.2) +
+  geom_line(aes(y = sum_end_afternoon, group = 1, color = '还车量'), 
+            linewidth = 1.2) +
+   geom_line(aes(y = diff, group = 1, color = '差异值'), 
+            linewidth = 1.2, linetype = "dashed") +
+  labs(x = "时间", y = "借还次数", title="Grove St PATH站点某一周晚高峰借还车辆情况",
+       color = "借还车") +
+  scale_color_manual(limits = c('借车量', '还车量', '差异值' ), values=c('#00bfc4','#f8766d', "black" )) +
+  theme(plot.title = element_text(hjust = 0.5), 
+        axis.text.x = element_text(angle = 45, hjust = 1)) 
+```
+
+### 绘图借还差值（早高峰）
+
+```{r}
+ggplot(work_morning_peak, aes(x = time, y = diff,
+                              fill = (diff > 0))) +
+  geom_col() +
+  scale_fill_manual(values = c("orange", "green")) +
+  labs(title="Grove St PATH站点早高峰车辆相对剩余情况", x="时间", y="车辆相对剩余量")  +
+theme(plot.title = element_text(hjust = 0.5),
+        axis.text.x = element_text(angle = 45, hjust = 1)) +
+  geom_text(aes(label = diff, y = ifelse(diff > 0, diff + 0.5, diff - 0.5)), size = 3)
+```
+
+### 绘图借还差值（晚高峰）
+
+```{r}
+ggplot(work_afternoon_peak, aes(x = time, y = diff,
+                              fill = (diff > 0))) +
+  geom_col() +
+  scale_fill_manual(values = c("orange", "green")) +
+  labs(title="Grove St PATH站点晚高峰车辆相对剩余情况", x="时间", y="车辆相对剩余量", x="时间", y="车辆相对剩余量") +
+  theme(plot.title = element_text(hjust = 0.5),
+        axis.text.x = element_text(angle = 45, hjust = 1)) +
+  geom_text(aes(label = diff, y = ifelse(diff > 0, diff + 0.5, diff-0.5)), size = 3)
+```
+
+# 出行订单数量OLS回归预测
+
+见另一个rmd文档
+
+# 机器学习预测
+
+见“Machine_learning_prediction”文件夹
+此部分用matlab编写
+
+# 其他绘图
+```{r}
+library(readxl)
+library(tidyverse)
+RMSE_R2 = read_excel("./Machine_learning_prediction/RMSE_R2.xlsx")
+```
+绘制折线图
+```{r}
+ggplot(RMSE_R2, aes(x = index)) +
+  geom_line(aes(y = RMSE1, color = "BP"), linewidth = 1.0) +
+  geom_point(aes(y = RMSE1)) + 
+  geom_line(aes(y = RMSE2, color = "BP_GA"), linewidth = 1.0) +
+  geom_point(aes(y = RMSE2)) + 
+  labs(title = "10次实验的的均方差对比", x = "实验次数", y = "均方差", color = "方法") +
+  scale_x_continuous(breaks = 1:10) +
+  theme(plot.title = element_text(hjust = 0.5))
+```
+
+```{R}
+ggplot(RMSE_R2, aes(x = index)) +
+  geom_line(aes(y = R2_1, color = "BP"), linewidth = 1.0) +
+  geom_point(aes(y = R2_1)) + 
+  geom_line(aes(y = R2_2, color = "BP_GA"), linewidth = 1.0) +
+  geom_point(aes(y = R2_2)) + 
+  labs(title = expression(paste("10次实验的R"^2, "对比")), x = "实验次数", y = expression("R"^2), color = "方法") +
+  scale_x_continuous(breaks = 1:10) +
+  theme(plot.title = element_text(hjust = 0.5))
+```
+## 地图绘制
+```{r}
+# install.packages("ggmap")
+library(ggplot2)
+library(ggmap)
+```
+
+```{r}
+# 设置地图中心点和缩放级别
+jc_center <- c(lon = -74.0672, lat = 40.7282)
+jc_zoom <- 13
+
+# 获取Jersey City地图
+jc_map <- get_stamenmap(bbox = c(left = -74.1, bottom = 40.68, right = -74.03, top = 40.78),
+                         zoom = jc_zoom,
+                         maptype = "toner-hybrid")
+
+# 创建散点图
+ggplot(data = cb, aes(x = start_lng, y = start_lat)) +
+  # 在地图上添加图层
+  annotation_raster(jc_map, xmin = -74.1, xmax = -74.02, ymin = 40.68, ymax = 40.78) +
+  # 绘制散点图
+  geom_point() +
+  # 设置坐标轴范围和标签
+  xlab("Longitude") +
+  ylab("Latitude")
+```
+
+
